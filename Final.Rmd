@@ -1,0 +1,564 @@
+---
+title: "What You Need To Win A League Of Legends Game"
+author: "Kris Li"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    code_folding: show
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      warning = FALSE)
+```
+
+## Introduction
+
+The goal of this survey is to build a statistical learning model that can predict the **Win/Lose** outcome of a player's League of Legends game based on the game statistics of all this player.
+
+### Why This Topic?
+
+League of Legends is a team-based strategy game where two teams of five powerful champions face off to destroy the others' base. League of Legends is the largest MOBA game title currently. With over 150 million registered players, any topic about the game could be widely spread in the gaming field easily. On the internet, there is a huge market of making gaming tutorial. And the hard core e-sport title League of Legends is one of the biggest part of this market. However, although their are many technical tutorials about how to play a character in the game better, there are not many resource about the analytically data side of the game. Players may want to learn from the objective fact instead of subjective explanations of the game.
+
+\newpage
+## Data Preparing
+
+First thing first, we load all libraries needed for data processing, visualization, and modeling.
+```{r}
+library(ggplot2)
+library(ggpubr)
+library(corrplot)
+library(dplyr)
+library(readr)
+library(tidymodels)
+library(ISLR)
+library(ISLR2)
+library(tidyverse)
+library(glmnet)
+library(rpart.plot)
+library(janitor)
+library(randomForest)
+library(vip)
+library(xgboost)
+library(ranger)
+library(Hmisc)
+library(kknn)
+library(kernlab)
+library(nnet)
+library(caret)
+tidymodels_prefer()
+set.seed(1203)
+```
+
+
+### Data Loading
+
+Because the data source provides raw and roughly processed data which has 'translated' the metadata from data crawling to readable data, we chose the roughly processed data as our base data before implementing more data processing. Since the roughly processed data are in multiple .csv files, we first combine them.
+
+```{r, echo=F}
+LOL_original <- list.files(path="data/Roughly processed", full.names = TRUE) %>% 
+  lapply(read_csv) %>% 
+  bind_rows 
+```
+We successfully acquired a single large dataset(284196 obs. of 63 variables). 
+We can proceed to data cleaning.
+
+\newpage
+### Data Cleaning and Analysis
+
+- Clean variable names with clean_names() to make calling variables easier by gets rid of the unreadable characters.
+
+- Remove `gameId`, `summonerName`, `puuid` with select() because they are just random strings that are not of our interests.
+
+- Remove `unrealKills` because I have no idea what it is.
+
+```{r}
+# omit rows with empty values
+LOL_original = na.omit(LOL_original)
+
+LOL <- LOL_original %>%
+  clean_names() %>%
+  select(-game_id, -summoner_name, -puuid, -unreal_kills)
+```
+
+- Check the distribution of outcome:
+```{r}
+LOL %>% 
+  ggplot(aes(x = win)) +
+  geom_bar()
+```
+
+The win rate of all observations is slightly smaller than 1/2. The difference is small but a stratified sampling may be more accurate when splitting.
+
+- Check variable types: 
+```{r}
+var_type <- as.data.frame(sapply(LOL, typeof))
+p <- ggplot(data=var_type, aes(x=sapply(LOL, typeof))) +
+     geom_bar(stat = "count") +
+     xlab('Variable Type')
+p
+```
+
+We need to transform factors into numeric, for further analysis such as correlation analysis. But let's first check numerical variables' distributions.
+
+- Check distribution of all numerical variables:
+```{r}
+LOL_num <- LOL %>% select_if(is.numeric)
+hist1 <- ggplot(gather(LOL_num[,c(1:9)]), aes(value)) + 
+  geom_histogram(bins = 30) + 
+  facet_wrap(~key, scales = 'free_x')
+hist2 <- ggplot(gather(LOL_num[,c(10:18)]), aes(value)) + 
+  geom_histogram(bins = 30) + 
+  facet_wrap(~key, scales = 'free_x')
+hist3 <- ggplot(gather(LOL_num[,c(19:27)]), aes(value)) + 
+  geom_histogram(bins = 30) + 
+  facet_wrap(~key, scales = 'free_x')
+hist4 <- ggplot(gather(LOL_num[,c(28:36)]), aes(value)) + 
+  geom_histogram(bins = 30) + 
+  facet_wrap(~key, scales = 'free_x')
+hist5 <- ggplot(gather(LOL_num[,c(37:45)]), aes(value)) + 
+  geom_histogram(bins = 30) + 
+  facet_wrap(~key, scales = 'free_x')
+hist6 <- ggplot(gather(LOL_num[,c(46:50)]), aes(value)) + 
+  geom_histogram(bins = 30) + 
+  facet_wrap(~key, scales = 'free_x')
+
+hist1
+hist2
+hist3
+hist4
+hist5
+hist6
+```
+
+We see that most of them are right skewed. Since the amount of skewness is acceptable, we will try variable transformations(Log-transformation since they are right-skewed) in model building.
+
+We can also notice that `game_duration` has a bunch of outliers that doesn't make sense, such as a 2000000 second game which convert to hours is 555. Since our research focus on the average game stats and we have more than enough data, we don't need to check if these outliers make sense in their individual cases. We can simply get rid of them. But since`game_duration` is expected to be a useful predictor, we can't remove this variable but can only remove the rows that don't make sense.
+
+According to https://us.millenium.gg/news/24746.html, the longest game in the history of League of Legends is 237 min and 02 seconds. So we omit rows with values larger than that. 
+
+```{r}
+dim(LOL)
+LOL <- LOL[LOL$game_duration <= 14222, ]  
+dim(LOL)
+```
+We got rid of 284196 - 257525 = 26671 useless row of data!
+
+Also, we can see that `lane` is uniformly distributed, `role`, `individual_position`, `penta_kills`, `quadra_kills`, `triple_kills`, `objective_stolen`, `objective_stolen_assists` are unimodal discretely distributed. These variables don't have enough variations so they won't contribute to our study. Let's remove them.
+```{r}
+LOL <- LOL %>%
+  select(-lane, -role, -individual_position, -penta_kills, -quadra_kills, -triple_kills, -objectives_stolen, -objectives_stolen_assists)
+dim(LOL)
+```
+
+We now have 51 variables in the dataset.
+
+- Mutate variable types for correlation plot:
+```{r}
+LOL_mutate <- LOL %>% 
+  mutate_if(is.character, as.factor) %>% 
+  mutate_if(is.logical, as.factor) %>% 
+  mutate_if(is.factor, as.numeric)
+```
+
+- Compute correlations with corr_simple():
+
+_corr_simple() is from https://towardsdatascience.com/how-to-create-a-correlation-matrix-with-too-many-variables-309cc0c0a57, I altered it to be able to set up a range for the correlation coefficient._
+```{r,echo=F}
+corr_simple <- function(data,sig_min,sig_max){
+  #run a correlation and drop the insignificant ones
+  corr <- cor(data, use="pairwise.complete.obs")
+  #prepare to drop duplicates and correlations of 1     
+  corr[lower.tri(corr,diag=TRUE)] <- NA 
+  #drop perfect correlations
+  corr[corr == 1] <- NA 
+  #turn into a 3-column table
+  corr <- as.data.frame(as.table(corr))
+  #remove the NA values from above 
+  corr <- na.omit(corr) 
+  #select significant values  
+  corr <- subset(corr, abs(Freq) > sig_min) 
+  corr <- subset(corr, abs(Freq) < sig_max)
+  #sort by highest correlation
+  corr <- corr[order(-abs(corr$Freq)),] 
+  #print table
+  print(corr)
+  #turn corr back into matrix in order to plot with corrplot
+  mtx_corr <- reshape2::acast(corr, Var1~Var2, value.var="Freq")
+  
+  #plot correlations visually
+  corrplot(mtx_corr, is.corr=FALSE, tl.col="black", na.label=" ")
+}
+```
+
+Let's check the correlation table and plot.
+
+We will look at the pairs that have correlation coefficients >= 0.85 to identify redundant variables.
+```{r}
+corr_simple(LOL_mutate ,0.85,1)
+```
+
+We see that `champ_level vs. champ_experience`, `gold_earned vs. gold_spent`, `detector_wards_placed vs. vision_wards_bought_in_game` and `turret_kills vs. damage_dealt_to_turrets` are redundant because champions level up by gaining a certain amount of experience point; players always spend all their gold in order to be more powerful; players need to buy detector ward before using them; players need to dealt damage to turret to take them down. So we remove `champ_experience`, `gold_earned`, 	`turret_kills`, and `vision_wards_bought_in_game`.
+```{r}
+LOL <- LOL %>%
+  select(-champ_experience, -gold_earned, -vision_wards_bought_in_game, -turret_kills)
+LOL_mutate <- LOL_mutate %>%
+  select(-champ_experience, -gold_earned, -vision_wards_bought_in_game, -turret_kills)
+corr_simple(LOL_mutate,0.85,1)
+```
+
+Now the strongly correlated pairs are all logical but not redundant. 
+
+Repeat these steps, the finalized reduced dataset is:
+```{r}
+LOL <- LOL %>% 
+  select(win, bounty_level, kills, assists, champ_level, double_kills, total_damage_dealt_to_champions, vision_score, damage_dealt_to_objectives, inhibitor_kills, killing_sprees, neutral_minions_killed, gold_spent) %>% 
+  mutate_if(is.logical, as.factor)
+LOL
+```
+
+We have finished data cleaning! A Code book of the current dataset `LOL_codebook.txt` is attached in the folder.
+
+### Correlation Analysis
+
+This is a correlation plot of all numerical variables.
+```{r}
+LOL_mutate <- LOL %>% 
+  mutate_if(is.character, as.factor) %>% 
+  mutate_if(is.factor, as.numeric)
+corrplot(cor(LOL_mutate, use = "complete.obs"),tl.cex=0.5)
+```
+
+Then, let's look at the correlation coefficients of the pairs `win` vs. all predictors.
+```{r}
+M <- cor(LOL_mutate[-1], LOL_mutate$win)
+M[order(M[,1],decreasing=TRUE),]
+```
+
+The largest correlation coefficient is 0.4514595, and most of them are much smaller than this.
+
+\newpage
+## Model Building
+
+### Data Spliting
+
+Since there are 257525 observations, a 80/20 split is definitely valid with respect to the size of the testing set. 
+As mentioned before when checking the response distribution, we will use stratified sampling by the outcome variable `win`.
+
+```{r}
+# LOL = LOL[sample(nrow(LOL),2500),]
+LOL_split <- LOL %>% 
+  initial_split(prop = 0.8, strata = "win")
+
+LOL_train <- training(LOL_split)
+LOL_test <- testing(LOL_split)
+
+dim(LOL_train)[1] 
+dim(LOL_test)[1]
+
+LOL_train$win <- as.factor(LOL_train$win)
+```
+
+There are 206019 observation in the training set `LOL_train` and 51506 observation in the testing set `LOL_test`.
+
+### Construct the recipe
+
+Set up a recipe to predict `win` with all predictors.
+Dummy-code all nominal predictors;
+Center and scale all predictors.
+```{r}
+LOL_recipe <- recipe(win ~ ., data = LOL_train) %>% 
+  step_dummy(all_nominal_predictors()) %>%
+  step_normalize(all_predictors())
+```
+
+
+### K-fold Cross Validation
+
+Fold the training data. Use k-fold cross-validation with k=10 with no repetitions. 
+
+```{r}
+LOL_folds <- vfold_cv(LOL_train, strata = win, v = 20)
+```
+
+### Model fitting
+
+Since this is a binary classification question, and according to https://ruslanmv.com/blog/The-best-binary-Machine-Learning-Model, I decided to fit the following models:
+
+- Logistic Regression
+
+- Decision Tree
+
+- Random Forest
+
+- Elastic Net
+
+- Boosted Tree
+
+- Support Vector Machine (Polynomial)
+
+#### Logistic Regression
+```{r, eval=F, echo=T}
+log_reg <- logistic_reg() %>% 
+  set_engine("glm") %>% 
+  set_mode("classification")
+
+log_wkflow <- workflow() %>% 
+  add_recipe(LOL_recipe) %>% 
+  add_model(log_reg)
+
+log_fit <- fit_resamples(log_wkflow, LOL_folds)
+
+save(log_fit, log_wkflow, file = "rdas/log_fit.rda")
+```
+
+#### Decision Tree (Tuned)
+```{r, eval=F, echo=T}
+dt_spec <- decision_tree() %>%
+  set_engine("rpart") %>%
+  set_mode("classification")
+
+dt_wkflow <- workflow() %>%
+  add_model(dt_spec %>% set_args(cost_complexity = tune())) %>%
+  add_recipe(LOL_recipe)
+
+param_grid <- grid_regular(cost_complexity(range = c(-5, -1)), levels = 10)
+
+dt_tune <- tune_grid(
+  dt_wkflow, 
+  resamples = LOL_folds, 
+  grid = param_grid,
+  metrics = metric_set(roc_auc)
+)
+
+save(dt_tune, dt_wkflow, file = "rdas/Decision Tree.rda")
+```
+
+
+
+#### Random Forest (Tuned)
+```{r, eval=F, echo=T}
+rf_spec <- rand_forest() %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_spec %>% set_args(mtry = tune(), trees = tune(), min_n = tune())) %>%
+  add_recipe(LOL_recipe)
+
+rf_tune <-
+  rf_wf %>%
+  tune_grid(
+    resamples = LOL_folds, 
+    grid = expand.grid(
+      mtry = c(1:12), 
+      trees = c(20, 50, 60, 80),
+      min_n = c(2, 5, 15, 20)),
+      metrics = metric_set(roc_auc)
+  )
+
+save(rf_tune, rf_wf, file = "rdas/Random Forest.rda")
+```
+
+#### Elastic Net
+```{r, eval=F, echo=T}
+elastic_net_spec <- multinom_reg(penalty = tune(), 
+                                 mixture = tune()) %>% 
+  set_mode("classification") %>% 
+  set_engine("glmnet")
+
+en_workflow <- workflow() %>% 
+  add_recipe(LOL_recipe) %>% 
+  add_model(elastic_net_spec)
+
+en_grid <- grid_regular(penalty(range = c(-5, 5)), 
+                        mixture(range = c(0, 1)), levels = 10)
+
+en_tune <- tune_grid(
+  en_workflow,
+  resamples = LOL_folds, 
+  grid = en_grid
+)
+
+save(en_tune, en_workflow, file = "rdas/Elastic Net.rda")
+```
+
+#### Boosted Tree
+```{r, eval=F, echo=T}
+bt_spec <- boost_tree(mode = "classification",
+                       min_n = tune(),
+                       mtry = tune(),
+                       learn_rate = tune()) %>% 
+  set_engine("xgboost")
+
+bt_workflow <- workflow() %>% 
+  add_model(bt_spec) %>% 
+  add_recipe(LOL_recipe)
+
+bt_params <- parameters(bt_spec) %>% 
+  update(mtry = mtry(range= c(1, 12)),
+         learn_rate = learn_rate(range = c(-5, 0.2))
+  )
+
+bt_grid <- grid_regular(bt_params, levels = 2)
+
+bt_tune <- bt_workflow %>% 
+  tune_grid(
+    resamples = LOL_folds, 
+    grid = bt_grid
+    )
+
+save(bt_tune, bt_workflow, file = "rdas/Boosted Tree.rda")
+```
+
+#### SVM(poly)
+```{r, eval=F, echo=T}
+svm_spec <- svm_poly(degree = 1, cost = 1/4) %>%
+  set_engine("kernlab") %>%
+  set_mode("classification")
+
+svm_wf <- workflow() %>%
+  add_model(svm_spec) %>%
+  add_recipe(LOL_recipe)
+
+svm_grid <- grid_regular(cost(range = c(0, 5)), 
+                         degree(range = c(2,5)), levels = 10)
+
+svm_tune <- tune_grid(
+  svm_wf,
+  resamples = LOL_folds, 
+  grid = svm_grid
+)
+
+save(svm_fit, svm_wf, file = "rdas/SVM.rda")
+```
+
+
+### Model selection and performance:
+
+Let's compare model performance by accuracy and roc_auc.
+```{r}
+# Load models
+load(file = "rdas/log_fit.rda")
+load(file = "rdas/Decision Tree.rda")
+load(file = "rdas/Random Forest.rda")
+load(file = "rdas/Elastic Net.rda")
+load(file = "rdas/Boosted Tree.rda")
+load(file = "rdas/SVM.rda")
+```
+
+
+Best roc_auc of each model: 
+```{r}
+# Logistic Regression
+log_fit_metrics <- collect_metrics(log_fit) %>%
+  arrange(desc(mean)) %>% head(1)
+# Pruned decision tree
+dt_tune_metrics <- collect_metrics(dt_tune) %>%
+  arrange(desc(mean)) %>% head(1)
+# Random Forest
+rf_tune_metrics <- collect_metrics(rf_tune) %>%
+  arrange(desc(mean)) %>% head(1)
+# Elastic Net
+en_tune_metrics <- collect_metrics(en_tune) %>%
+  arrange(desc(mean)) %>% head(1)
+# Boosted Tree
+bt_tune_metrics <- collect_metrics(bt_tune) %>%
+  arrange(desc(mean)) %>% head(1)
+# SVM
+svm_fit_metrics <- collect_metrics(svm_fit) %>%
+  arrange(desc(mean)) %>% head(1)
+
+
+# Combined
+results <- bind_rows(log_fit_metrics, dt_tune_metrics, rf_tune_metrics, en_tune_metrics, bt_tune_metrics, svm_fit_metrics) %>% 
+  tibble() %>% 
+  mutate(model = c("Logistic", "Decision Tree", "Random Forest", "Elastic Net", "Boosted Tree", "SVM"))
+results %>% 
+  select(model, mean, std_err) %>%
+  arrange(desc(mean))
+```
+We can see that `Random Forest` with parameters `mtry=2, trees=60, min_n=15`, has the highest mean of roc_auc. 
+
+`SVM` has the second largest mean of roc_auc but has a higher standard error.
+
+However, I decided to choose the `elastic net` model with `penalty = 0.001668101, mixture = 1` here because its mean of roc_auc is very close to the one of `random forest` model (about 1 standard error away), but it has a much a lower standard error. 
+
+#### Elastic Net Analysis and Final Fitting: 
+
+Let's visualize the tuning of the elastic net.
+```{r}
+autoplot(en_tune)
+rf_tune_metrics <- collect_metrics(rf_tune) %>%
+  arrange(desc(mean))
+```
+
+The plot shows that smaller values of amount of regularization and smaller values of proportion of lasso penalty tend to result in higher ROC-AUC and accuracy values..
+
+
+Let's look at the performance of the tuned `elastic net` on the whole training set:
+```{r}
+best_en <- select_best(en_tune, metric = "roc_auc")
+en_wf <- finalize_workflow(en_workflow, best_en)
+en_fit <- fit(en_wf, data = LOL_train)
+predicted_data <- augment(en_fit, new_data = LOL_train) %>% 
+  select(win, starts_with(".pred"))
+predicted_data %>% roc_curve(win, .pred_FALSE) %>% autoplot()
+predicted_data %>% roc_auc(win, .pred_FALSE)
+```
+The overall roc_auc on the training set is 0.9171857, a strong value.
+
+
+
+We can now fit it to the `testing set`.
+```{r}
+predicted_data_test <- augment(en_fit, new_data = LOL_test) %>% 
+  select(win, starts_with(".pred"))
+predicted_data_test %>% roc_curve(win, .pred_FALSE) %>% autoplot()
+predicted_data_test %>% roc_auc(win, .pred_FALSE)
+predicted_data_test %>% 
+  conf_mat(truth = win, estimate = .pred_class) %>%
+  autoplot(type = "heatmap")
+win <- as.numeric(predicted_data$win)
+pred.win <- as.numeric(predicted_data$.pred_class)
+(sum(win==pred.win)) / length(pred.win)
+```
+
+The overall roc_auc is 0.9175225, even higher than it was in the training set. The difference of the two are very small, so the cause of this is probably that we have a big data set, so the stratified randomized training and testing sets show almost identical response to model fitting. 
+
+The model predicts 84.8% of the testing data correctly. But as the heat map shows, it predicts losing better than winning. In other words, it's Type II error rate is larger than Type I error rate.
+
+
+
+
+\newpage
+## Conclusion
+
+Discusses the outcome(s) of models you fit. Which models performed well, which performed poorly? Were you surprised by model performance? Next steps? General conclusions?
+This model could have practical use 
+
+In model fitting, we saw that the tuned `Random Forest` and `SVM` have highest means of roc_auc but also with higher standard errors. `Decision tree`, the worst performing model, also has a 0.8700979 mean of roc_auc with a 0.004259073	standard error. So we can conclude that all models worked well. And choose the `elastic net` model as our model of interest because it has high roc_auc with low standard error. Finally, it results with a overall roc_auc of 0.9175225, and a 84.8% accuracy of predicting the testing set.
+
+This result is surprising, since at the very beginning when I did the correlation plot of all variables, many of them have correlation coefficients less than 0.1. I almost started to believe that they are random and there is no pattern in the data. But all of these supervised learning models show good performances. 
+
+This model is possible to be generated to a much larger dataset because it has a large number of observations which included a large amount of the player base of League of Legends. 
+
+#### Applications
+
+
+
+```{r}
+en_wf %>%
+  fit(data = LOL_test) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "point")
+```
+
+We can use the variable importance plot to observe that `vision_score` and `neutral_minions_killed` are not very important in predicting the outcome of the game with this model. This would be an interesting argument to be published because these two variables are commonly know as the factors that distinguish between a good player and a bad player. 
+
+#### Future improvements
+
+I have possibly made some human error in variable selection in EDA. We can try to include more variables or change some existed variables for model fitting.

@@ -1,0 +1,13 @@
+win - factor - The outcome of the game (default first level is False(lose))
+bounty_level - double - The amount bounty a champion has
+kills - double - The number of opposing team champions this champion has killed
+assists - double - The number of allied champions this has champion assisted to get kills
+champ_level - double - The level of champion at the end of the match
+double_kills - double - The number of double kills
+total_damage_dealt_to_champions - double - All damage a champion has dealt on all opposing team champions
+vision_score - double - The number of vision wards a champion has placed
+damage_dealt_to_objectives - double - All damage a champion has dealt on all opposing team objectives
+inhibitor_kills - double - The number of inhibitor this champion has took down
+killing_sprees - double - The number of the events that is discribeb by countinously killing multiple opposing champions without dying
+neutral_minions_killed - double - The number of opposing team minions or neutral jungle monsters this champion has killed
+gold_spent - double - The amound of gold this champion has spent on buying items
